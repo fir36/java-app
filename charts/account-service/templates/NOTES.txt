@@ -1,0 +1,8 @@
+account-service has been deployed to namespace {{ .Values.namespace }}.
+
+Check status with:
+  kubectl -n {{ .Values.namespace }} get pods,svc -l app.kubernetes.io/instance={{ .Release.Name }}
+
+Port-forward to test locally:
+  kubectl -n {{ .Values.namespace }} port-forward svc/{{ include "account-service.fullname" . }} 8080:{{ .Values.service.port }}
+  curl http://localhost:8080/actuator/health
