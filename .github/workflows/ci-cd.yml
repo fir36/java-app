@@ -252,39 +252,28 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
-
+ 
       - name: Download image artifact
         uses: actions/download-artifact@v4
         with:
           name: docker-image
-
+ 
       - name: Load image
         run: docker load -i account-service-image.tar
-
-      - name: Trivy scan - generate SARIF report
+ 
+      - name: Trivy scan
         env:
-          TRIVY_FORMAT: sarif
-          TRIVY_OUTPUT: trivy-results.sarif
           TRIVY_SEVERITY: HIGH,CRITICAL
-          TRIVY_EXIT_CODE: '0'
+          TRIVY_IGNORE_UNFIXED: 'true'
+          TRIVY_FAIL_ON_FINDINGS: ${{ env.FAIL_ON_IMAGE_VULNS }}
         run: bash "${{ env.IMAGE_SCAN_SCRIPT_DIR }}/trivy.sh" "${{ needs.docker-build.outputs.image_name }}:${{ needs.docker-build.outputs.image_tag }}"
-
+ 
       - name: Upload Trivy SARIF report to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
           sarif_file: trivy-results.sarif
           category: trivy-container-scan
-
-      - name: Trivy scan - enforce HIGH/CRITICAL gate
-        env:
-          TRIVY_FORMAT: table
-          TRIVY_OUTPUT: ''
-          TRIVY_SEVERITY: HIGH,CRITICAL
-          TRIVY_EXIT_CODE: '1'
-          TRIVY_IGNORE_UNFIXED: 'true'
-        run: bash "${{ env.IMAGE_SCAN_SCRIPT_DIR }}/trivy.sh" "${{ needs.docker-build.outputs.image_name }}:${{ needs.docker-build.outputs.image_tag }}"
-
   # -------------------------------------------------------------------------
   # 3c) DOCKER PUSH - publish the verified image (main branch only)
   #
