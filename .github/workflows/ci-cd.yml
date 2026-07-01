@@ -208,11 +208,29 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Fails loudly (instead of silently writing a broken/empty image
+      # name to GITHUB_OUTPUT) if DOCKERHUB_USERNAME isn't resolvable
+      # here - most commonly because it's an environment-scoped secret
+      # tied to an environment this job doesn't declare (only the deploy
+      # jobs declare `environment: production`), so it silently evaluates
+      # to an empty string in jobs that don't.
       - name: Normalize image name to lowercase
         id: image
         run: |
           IMAGE_NAME_LC=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
-          echo "name=${{ secrets.DOCKERHUB_USERNAME }}/${IMAGE_NAME_LC}" >> "$GITHUB_OUTPUT"
+          DOCKERHUB_USER="${{ secrets.DOCKERHUB_USERNAME }}"
+          if [ -z "$DOCKERHUB_USER" ]; then
+            echo "❌ secrets.DOCKERHUB_USERNAME is empty. Check that it's a repo/org secret," \
+                 "not one scoped only to an environment this job doesn't declare." >&2
+            exit 1
+          fi
+          if [ -z "$IMAGE_NAME_LC" ]; then
+            echo "❌ IMAGE_NAME resolved empty (github.event.repository.name missing?)" >&2
+            exit 1
+          fi
+          FULL_NAME="${DOCKERHUB_USER}/${IMAGE_NAME_LC}"
+          echo "📦 Image name resolved to: ${FULL_NAME}"
+          echo "name=${FULL_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Build local image tag
         uses: docker/build-push-action@v6
@@ -251,22 +269,22 @@ jobs:
   #   steps:
   #     - name: Checkout source
   #       uses: actions/checkout@v4
- 
+
   #     - name: Download image artifact
   #       uses: actions/download-artifact@v4
   #       with:
   #         name: docker-image
- 
+
   #     - name: Load image
   #       run: docker load -i account-service-image.tar
- 
+
   #     - name: Trivy scan
   #       env:
   #         TRIVY_SEVERITY: HIGH,CRITICAL
   #         TRIVY_IGNORE_UNFIXED: 'true'
   #         TRIVY_FAIL_ON_FINDINGS: ${{ env.FAIL_ON_IMAGE_VULNS }}
   #       run: bash "${{ env.IMAGE_SCAN_SCRIPT_DIR }}/trivy.sh" "${{ needs.docker-build.outputs.image_name }}:${{ needs.docker-build.outputs.image_tag }}"
- 
+
   #     - name: Upload Trivy SARIF report to GitHub Security tab
   #       uses: github/codeql-action/upload-sarif@v3
   #       if: always()
@@ -293,10 +311,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: docker-image
- 
+
       - name: Load image
         run: docker load -i account-service-image.tar
- 
+
       # Requires DOCKERHUB_USERNAME + DOCKERHUB_TOKEN (a Docker Hub access
       # token, not your account password) as repo/org secrets. No
       # `registry:` input needed - login-action defaults to Docker Hub.
@@ -305,15 +323,20 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
- 
+
       - name: Tag and push verified image
         run: |
           IMAGE="${{ needs.docker-build.outputs.image_name }}"
           TAG="${{ needs.docker-build.outputs.image_tag }}"
+          if [ -z "$IMAGE" ]; then
+            echo "❌ needs.docker-build.outputs.image_name is empty - check the" \
+                 "'Normalize image name to lowercase' step in the docker-build job." >&2
+            exit 1
+          fi
           docker tag "${IMAGE}:${TAG}" "${IMAGE}:latest"
           docker push "${IMAGE}:${TAG}"
           docker push "${IMAGE}:latest"
- 
+
   # -------------------------------------------------------------------------
   # 4a) DEPLOY - basic, single-box EC2 deploy
   #
@@ -336,17 +359,17 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
- 
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
- 
+
       # Logic lives in scripts/deploy/ec2-basic/deploy.sh
       - name: Deploy to EC2
         run: bash "${{ env.DEPLOY_SCRIPT_DIR }}/ec2-basic/deploy.sh" "${{ needs.docker-push.outputs.image_name }}" "${{ needs.docker-push.outputs.image_tag }}"
- 
+
   # -------------------------------------------------------------------------
   # 4b) DEPLOY - Kubernetes via Helm chart (charts/account-service)
   #
@@ -369,23 +392,22 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
- 
+
       - name: Set up Helm
         uses: azure/setup-helm@v4
         with:
           version: 'v3.15.0'
- 
+
       - name: Configure kubeconfig from secret
         run: |
           mkdir -p "$HOME/.kube"
           echo "${{ secrets.KUBE_CONFIG_BASE64 }}" | base64 --decode > "$HOME/.kube/config"
           chmod 600 "$HOME/.kube/config"
- 
+
       # Logic lives in scripts/deploy/kubernetes-helm/deploy.sh
       - name: Deploy via Helm
         run: bash "${{ env.DEPLOY_SCRIPT_DIR }}/kubernetes-helm/deploy.sh" "${{ needs.docker-push.outputs.image_name }}" "${{ needs.docker-push.outputs.image_tag }}"
- 
+
       - name: Remove kubeconfig
         if: always()
         run: rm -f "$HOME/.kube/config"
- 
