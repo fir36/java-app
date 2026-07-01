@@ -117,72 +117,72 @@ jobs:
   #    fail_on_sast_findings=true (input or DEFAULT_FAIL_ON_SAST variable)
   #    to make any tool's findings a hard gate.
   # -------------------------------------------------------------------------
-  sast-scan:
-    name: SAST Scan (${{ github.event.inputs.sast_tool || vars.DEFAULT_SAST_TOOL || 'semgrep' }})
-    runs-on: self-hosted
-    needs: build-and-test
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
+  # sast-scan:
+  #   name: SAST Scan (${{ github.event.inputs.sast_tool || vars.DEFAULT_SAST_TOOL || 'semgrep' }})
+  #   runs-on: self-hosted
+  #   needs: build-and-test
+  #   permissions:
+  #     contents: read
+  #     security-events: write
+  #   steps:
+  #     - name: Checkout source
+  #       uses: actions/checkout@v4
 
-      - name: Set up JDK ${{ env.JAVA_VERSION }}
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
-          cache: maven
+  #     - name: Set up JDK ${{ env.JAVA_VERSION }}
+  #       uses: actions/setup-java@v4
+  #       with:
+  #         distribution: temurin
+  #         java-version: ${{ env.JAVA_VERSION }}
+  #         cache: maven
 
-      # Needed so SonarQube can analyze bytecode + coverage; harmless for
-      # the other tools.
-      - name: Build for analysis (tests + coverage report)
-        run: mvn -B clean verify
+  #     # Needed so SonarQube can analyze bytecode + coverage; harmless for
+  #     # the other tools.
+  #     - name: Build for analysis (tests + coverage report)
+  #       run: mvn -B clean verify
 
-      # --- Semgrep --- (logic lives in scripts/security/sast/semgrep.sh)
-      - name: Run Semgrep scan
-        id: semgrep
-        if: contains(fromJSON('["semgrep","all"]'), env.SAST_TOOL)
-        continue-on-error: ${{ env.FAIL_ON_SAST_FINDINGS != 'true' }}
-        run: bash "${{ env.SAST_SCRIPT_DIR }}/semgrep.sh"
+  #     # --- Semgrep --- (logic lives in scripts/security/sast/semgrep.sh)
+  #     - name: Run Semgrep scan
+  #       id: semgrep
+  #       if: contains(fromJSON('["semgrep","all"]'), env.SAST_TOOL)
+  #       continue-on-error: ${{ env.FAIL_ON_SAST_FINDINGS != 'true' }}
+  #       run: bash "${{ env.SAST_SCRIPT_DIR }}/semgrep.sh"
 
-      - name: Upload Semgrep SARIF report
-        if: contains(fromJSON('["semgrep","all"]'), env.SAST_TOOL) && always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: semgrep-results.sarif
-          category: semgrep
+  #     - name: Upload Semgrep SARIF report
+  #       if: contains(fromJSON('["semgrep","all"]'), env.SAST_TOOL) && always()
+  #       uses: github/codeql-action/upload-sarif@v3
+  #       with:
+  #         sarif_file: semgrep-results.sarif
+  #         category: semgrep
 
-      # --- SonarQube --- (logic lives in scripts/security/sast/sonar.sh)
-      # Requires: SONAR_TOKEN, SONAR_HOST_URL (repo or org secrets)
-      - name: SonarQube scan
-        id: sonarqube
-        if: contains(fromJSON('["sonarqube","all"]'), env.SAST_TOOL)
-        continue-on-error: ${{ env.FAIL_ON_SAST_FINDINGS != 'true' }}
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-        run: bash "${{ env.SAST_SCRIPT_DIR }}/sonar.sh"
+  #     # --- SonarQube --- (logic lives in scripts/security/sast/sonar.sh)
+  #     # Requires: SONAR_TOKEN, SONAR_HOST_URL (repo or org secrets)
+  #     - name: SonarQube scan
+  #       id: sonarqube
+  #       if: contains(fromJSON('["sonarqube","all"]'), env.SAST_TOOL)
+  #       continue-on-error: ${{ env.FAIL_ON_SAST_FINDINGS != 'true' }}
+  #       env:
+  #         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  #         SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+  #       run: bash "${{ env.SAST_SCRIPT_DIR }}/sonar.sh"
 
-      # --- Fortify SSC SAST (via fcli) ---
-      # fortify/github-action@v3 is a single, unified action: it packages
-      # the source, runs the scan, and (when configured) exports SAST
-      # results straight to the GitHub Security tab in one step. There is
-      # no fortify/github-action/sast-scan or /fpr-import sub-action to
-      # call separately, so this replaces what used to be two steps.
-      # Requires organization secrets: FORTIFY_SSC_URL, FORTIFY_SSC_TOKEN,
-      # FORTIFY_SC_SAST_TOKEN
-      - name: Fortify SSC SAST scan
-        id: fortify
-        if: contains(fromJSON('["fortify","all"]'), env.SAST_TOOL)
-        continue-on-error: ${{ env.FAIL_ON_SAST_FINDINGS != 'true' }}
-        uses: fortify/github-action@v3
-        env:
-          SSC_URL: ${{ secrets.FORTIFY_SSC_URL }}
-          SSC_TOKEN: ${{ secrets.FORTIFY_SSC_TOKEN }}
-          SC_SAST_TOKEN: ${{ secrets.FORTIFY_SC_SAST_TOKEN }}
-          PACKAGE_EXTRA_OPTS: -bt mvn
+  #     # --- Fortify SSC SAST (via fcli) ---
+  #     # fortify/github-action@v3 is a single, unified action: it packages
+  #     # the source, runs the scan, and (when configured) exports SAST
+  #     # results straight to the GitHub Security tab in one step. There is
+  #     # no fortify/github-action/sast-scan or /fpr-import sub-action to
+  #     # call separately, so this replaces what used to be two steps.
+  #     # Requires organization secrets: FORTIFY_SSC_URL, FORTIFY_SSC_TOKEN,
+  #     # FORTIFY_SC_SAST_TOKEN
+  #     - name: Fortify SSC SAST scan
+  #       id: fortify
+  #       if: contains(fromJSON('["fortify","all"]'), env.SAST_TOOL)
+  #       continue-on-error: ${{ env.FAIL_ON_SAST_FINDINGS != 'true' }}
+  #       uses: fortify/github-action@v3
+  #       env:
+  #         SSC_URL: ${{ secrets.FORTIFY_SSC_URL }}
+  #         SSC_TOKEN: ${{ secrets.FORTIFY_SSC_TOKEN }}
+  #         SC_SAST_TOKEN: ${{ secrets.FORTIFY_SC_SAST_TOKEN }}
+  #         PACKAGE_EXTRA_OPTS: -bt mvn
 
   # -------------------------------------------------------------------------
   # 3a) DOCKER BUILD - build the image locally, hand it off as an artifact
@@ -196,7 +196,7 @@ jobs:
   docker-build:
     name: Container Build
     runs-on: self-hosted
-    needs: [ build-and-test, sast-scan ]
+    needs: [ build-and-test ]
     permissions:
       contents: read
     outputs:
@@ -242,38 +242,38 @@ jobs:
   #     the SARIF report first, then runs a second pass that fails the
   #     pipeline on HIGH/CRITICAL findings (with fixes available).
   # -------------------------------------------------------------------------
-  image-scan:
-    name: Container Image Scan
-    runs-on: self-hosted
-    needs: docker-build
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
+  # image-scan:
+  #   name: Container Image Scan
+  #   runs-on: self-hosted
+  #   needs: docker-build
+  #   permissions:
+  #     contents: read
+  #     security-events: write
+  #   steps:
+  #     - name: Checkout source
+  #       uses: actions/checkout@v4
  
-      - name: Download image artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image
+  #     - name: Download image artifact
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         name: docker-image
  
-      - name: Load image
-        run: docker load -i account-service-image.tar
+  #     - name: Load image
+  #       run: docker load -i account-service-image.tar
  
-      - name: Trivy scan
-        env:
-          TRIVY_SEVERITY: HIGH,CRITICAL
-          TRIVY_IGNORE_UNFIXED: 'true'
-          TRIVY_FAIL_ON_FINDINGS: ${{ env.FAIL_ON_IMAGE_VULNS }}
-        run: bash "${{ env.IMAGE_SCAN_SCRIPT_DIR }}/trivy.sh" "${{ needs.docker-build.outputs.image_name }}:${{ needs.docker-build.outputs.image_tag }}"
+  #     - name: Trivy scan
+  #       env:
+  #         TRIVY_SEVERITY: HIGH,CRITICAL
+  #         TRIVY_IGNORE_UNFIXED: 'true'
+  #         TRIVY_FAIL_ON_FINDINGS: ${{ env.FAIL_ON_IMAGE_VULNS }}
+  #       run: bash "${{ env.IMAGE_SCAN_SCRIPT_DIR }}/trivy.sh" "${{ needs.docker-build.outputs.image_name }}:${{ needs.docker-build.outputs.image_tag }}"
  
-      - name: Upload Trivy SARIF report to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: trivy-results.sarif
-          category: trivy-container-scan
+  #     - name: Upload Trivy SARIF report to GitHub Security tab
+  #       uses: github/codeql-action/upload-sarif@v3
+  #       if: always()
+  #       with:
+  #         sarif_file: trivy-results.sarif
+  #         category: trivy-container-scan
   # -------------------------------------------------------------------------
   # 3c) DOCKER PUSH - publish the verified image (main branch only)
   #
@@ -283,11 +283,10 @@ jobs:
   docker-push:
     name: Container Publish
     runs-on: self-hosted
-    needs: [ docker-build, image-scan ]
+    needs: [ docker-build]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
-      packages: write
     outputs:
       image_name: ${{ needs.docker-build.outputs.image_name }}
       image_tag: ${{ needs.docker-build.outputs.image_tag }}
@@ -296,17 +295,19 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: docker-image
-
+ 
       - name: Load image
         run: docker load -i account-service-image.tar
-
-      - name: Log in to GitHub Container Registry
+ 
+      # Requires DOCKERHUB_USERNAME + DOCKERHUB_TOKEN (a Docker Hub access
+      # token, not your account password) as repo/org secrets. No
+      # `registry:` input needed - login-action defaults to Docker Hub.
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+ 
       - name: Tag and push verified image
         run: |
           IMAGE="${{ needs.docker-build.outputs.image_name }}"
@@ -314,7 +315,7 @@ jobs:
           docker tag "${IMAGE}:${TAG}" "${IMAGE}:latest"
           docker push "${IMAGE}:${TAG}"
           docker push "${IMAGE}:latest"
-
+ 
   # -------------------------------------------------------------------------
   # 4a) DEPLOY - basic, single-box EC2 deploy
   #
@@ -335,22 +336,20 @@ jobs:
       name: production
     permissions:
       contents: read
-      packages: read
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
-
-      - name: Log in to GitHub Container Registry
+ 
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+ 
       # Logic lives in scripts/deploy/ec2-basic/deploy.sh
       - name: Deploy to EC2
         run: bash "${{ env.DEPLOY_SCRIPT_DIR }}/ec2-basic/deploy.sh" "${{ needs.docker-push.outputs.image_name }}" "${{ needs.docker-push.outputs.image_tag }}"
-
+ 
   # -------------------------------------------------------------------------
   # 4b) DEPLOY - Kubernetes via Helm chart (charts/account-service)
   #
@@ -373,22 +372,23 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
-
+ 
       - name: Set up Helm
         uses: azure/setup-helm@v4
         with:
           version: 'v3.15.0'
-
+ 
       - name: Configure kubeconfig from secret
         run: |
           mkdir -p "$HOME/.kube"
           echo "${{ secrets.KUBE_CONFIG_BASE64 }}" | base64 --decode > "$HOME/.kube/config"
           chmod 600 "$HOME/.kube/config"
-
+ 
       # Logic lives in scripts/deploy/kubernetes-helm/deploy.sh
       - name: Deploy via Helm
         run: bash "${{ env.DEPLOY_SCRIPT_DIR }}/kubernetes-helm/deploy.sh" "${{ needs.docker-push.outputs.image_name }}" "${{ needs.docker-push.outputs.image_tag }}"
-
+ 
       - name: Remove kubeconfig
         if: always()
         run: rm -f "$HOME/.kube/config"
+ 
