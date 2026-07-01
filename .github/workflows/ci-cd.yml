@@ -269,12 +269,17 @@ jobs:
   #     with labels matching `runs-on` below:
   #       ./config.sh --url https://github.com/fir36/java-app \
   #                   --token <runner-token> --labels ec2,linux
+  #
+  #     NOTE: job-level `if:` conditions cannot read the `env:` context
+  #     (env is only resolved within steps), so the deploy-target switch is
+  #     re-evaluated here using the same input -> variable -> default
+  #     fallback chain used to build env.DEPLOY_TARGET above.
   # -------------------------------------------------------------------------
   deploy-ec2-basic:
     name: Deploy (EC2 basic docker)
     runs-on: [ self-hosted, ec2, linux ]
     needs: docker-build-scan-push
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && env.DEPLOY_TARGET == 'ec2-basic'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && (github.event.inputs.deploy_target || vars.DEFAULT_DEPLOY_TARGET || 'ec2-basic') == 'ec2-basic'
     environment:
       name: production
     permissions:
@@ -323,12 +328,15 @@ jobs:
   #     Requires a base64-encoded kubeconfig stored as KUBE_CONFIG_BASE64 in
   #     the "production" GitHub Environment. Generate with:
   #       cat ~/.kube/config | base64 -w0
+  #
+  #     NOTE: see the comment on deploy-ec2-basic above re: env not being
+  #     available in job-level `if:` conditions.
   # -------------------------------------------------------------------------
   deploy-kubernetes-helm:
     name: Deploy (Kubernetes / Helm)
     runs-on: ubuntu-latest
     needs: docker-build-scan-push
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && env.DEPLOY_TARGET == 'kubernetes-helm'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && (github.event.inputs.deploy_target || vars.DEFAULT_DEPLOY_TARGET || 'ec2-basic') == 'kubernetes-helm'
     environment:
       name: production
     permissions:
