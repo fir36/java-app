@@ -210,17 +210,17 @@ jobs:
 
       # Fails loudly (instead of silently writing a broken/empty image
       # name to GITHUB_OUTPUT) if DOCKERHUB_USERNAME isn't resolvable
-      # here - most commonly because it's an environment-scoped secret
-      # tied to an environment this job doesn't declare (only the deploy
-      # jobs declare `environment: production`), so it silently evaluates
-      # to an empty string in jobs that don't.
+      # here - most commonly because it's a repo Variable scoped to an
+      # environment this job doesn't declare (only the deploy jobs
+      # declare `environment: production`), so it silently evaluates to
+      # an empty string in jobs that don't.
       - name: Normalize image name to lowercase
         id: image
         run: |
           IMAGE_NAME_LC=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
-          DOCKERHUB_USER="${{ secrets.DOCKERHUB_USERNAME }}"
+          DOCKERHUB_USER="${{ vars.DOCKERHUB_USERNAME }}"
           if [ -z "$DOCKERHUB_USER" ]; then
-            echo "❌ secrets.DOCKERHUB_USERNAME is empty. Check that it's a repo/org secret," \
+            echo "❌ vars.DOCKERHUB_USERNAME is empty. Check that it's a repo/org variable," \
                  "not one scoped only to an environment this job doesn't declare." >&2
             exit 1
           fi
@@ -315,13 +315,14 @@ jobs:
       - name: Load image
         run: docker load -i account-service-image.tar
 
-      # Requires DOCKERHUB_USERNAME + DOCKERHUB_TOKEN (a Docker Hub access
-      # token, not your account password) as repo/org secrets. No
-      # `registry:` input needed - login-action defaults to Docker Hub.
+      # DOCKERHUB_USERNAME is a repo/org Variable (not sensitive), while
+      # DOCKERHUB_TOKEN is a repo/org Secret (a Docker Hub access token,
+      # not your account password). No `registry:` input needed -
+      # login-action defaults to Docker Hub.
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Tag and push verified image
@@ -363,7 +364,7 @@ jobs:
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # Logic lives in scripts/deploy/ec2-basic/deploy.sh
