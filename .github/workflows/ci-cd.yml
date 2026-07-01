@@ -284,7 +284,6 @@ jobs:
     name: Container Publish
     runs-on: self-hosted
     needs: [ docker-build]
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
     outputs:
@@ -331,7 +330,6 @@ jobs:
     name: Deploy (EC2 basic docker)
     runs-on: self-hosted
     needs: docker-push
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && (github.event.inputs.deploy_target || vars.DEFAULT_DEPLOY_TARGET || 'ec2-basic') == 'ec2-basic'
     environment:
       name: production
     permissions:
