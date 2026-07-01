@@ -52,8 +52,7 @@ on:
         default: 'false'
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_NAME: ${{ github.event.repository.name }}
   JAVA_VERSION: '21'
   SAST_TOOL: ${{ github.event.inputs.sast_tool || vars.DEFAULT_SAST_TOOL || 'semgrep' }}
   DEPLOY_TARGET: ${{ github.event.inputs.deploy_target || vars.DEFAULT_DEPLOY_TARGET || 'ec2-basic' }}
@@ -213,7 +212,7 @@ jobs:
         id: image
         run: |
           IMAGE_NAME_LC=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
-          echo "name=${{ env.REGISTRY }}/${IMAGE_NAME_LC}" >> "$GITHUB_OUTPUT"
+          echo "name=${{ secrets.DOCKERHUB_USERNAME }}/${IMAGE_NAME_LC}" >> "$GITHUB_OUTPUT"
 
       - name: Build local image tag
         uses: docker/build-push-action@v6
