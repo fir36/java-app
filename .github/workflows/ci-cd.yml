@@ -21,6 +21,12 @@ name: CI/CD Pipeline
 #   scripts/deploy/<target>/deploy.sh        ec2-basic/, kubernetes-helm/
 # To add a tool/target, drop a new script in the matching folder and point
 # a step at it - no need to touch the rest of the workflow.
+#
+# Fortify is the one exception: fortify/github-action@v3 is a single,
+# unified fcli-based action (package -> scan -> optional GitHub Security
+# tab export all in one step). There is no separate "sast-scan" or
+# "fpr-import" sub-action to shell out to, so its config lives inline as
+# step env vars rather than in scripts/security/sast/.
 
 on:
   push:
@@ -101,8 +107,9 @@ jobs:
   #    semgrep    - free, no license, runs out of the box (default)
   #    sonarqube  - needs SONAR_TOKEN + SONAR_HOST_URL secrets (self-hosted
   #                 SonarQube server or SonarCloud)
-  #    fortify    - needs FORTIFY_SSC_URL, FORTIFY_SSC_TOKEN, FORTIFY_LICENSE
-  #                 organization secrets (Fortify Static Code Analyzer)
+  #    fortify    - needs FORTIFY_SSC_URL, FORTIFY_SSC_TOKEN,
+  #                 FORTIFY_SC_SAST_TOKEN organization secrets (Fortify SSC
+  #                 SAST via fortify/github-action@v3 / fcli)
   #    all        - runs every tool above so results can be compared
   #                 side-by-side in the Security tab (one SARIF category each)
   #
@@ -158,42 +165,40 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         run: bash "${{ env.SAST_SCRIPT_DIR }}/sonar.sh"
 
-      # --- Fortify Static Code Analyzer ---
+      # --- Fortify SSC SAST (via fcli) ---
+      # fortify/github-action@v3 is a single, unified action: it packages
+      # the source, runs the scan, and (when configured) exports SAST
+      # results straight to the GitHub Security tab in one step. There is
+      # no fortify/github-action/sast-scan or /fpr-import sub-action to
+      # call separately, so this replaces what used to be two steps.
       # Requires organization secrets: FORTIFY_SSC_URL, FORTIFY_SSC_TOKEN,
-      # FORTIFY_LICENSE (base64-encoded fortify.license). Placeholder until
-      # a real Fortify entitlement is wired up.
-      - name: Fortify Static Code Analyzer scan
+      # FORTIFY_SC_SAST_TOKEN
+      - name: Fortify SSC SAST scan
         id: fortify
         if: contains(fromJSON('["fortify","all"]'), env.SAST_TOOL)
         continue-on-error: ${{ env.FAIL_ON_SAST_FINDINGS != 'true' }}
-        uses: fortify/github-action/sast-scan@v1
-        with:
-          sast-scan-args: -b account-service -bt mvn -bf pom.xml
+        uses: fortify/github-action@v3
         env:
-          FORTIFY_SSC_URL: ${{ secrets.FORTIFY_SSC_URL }}
-          FORTIFY_TOKEN: ${{ secrets.FORTIFY_SSC_TOKEN }}
-          FORTIFY_LICENSE: ${{ secrets.FORTIFY_LICENSE }}
-
-      - name: Import Fortify results into GitHub Security tab
-        if: contains(fromJSON('["fortify","all"]'), env.SAST_TOOL) && always()
-        uses: fortify/github-action/fpr-import@v1
-        with:
-          file: gh-scan-output.fpr
-        env:
-          FORTIFY_SSC_URL: ${{ secrets.FORTIFY_SSC_URL }}
-          FORTIFY_TOKEN: ${{ secrets.FORTIFY_SSC_TOKEN }}
+          SSC_URL: ${{ secrets.FORTIFY_SSC_URL }}
+          SSC_TOKEN: ${{ secrets.FORTIFY_SSC_TOKEN }}
+          SC_SAST_TOKEN: ${{ secrets.FORTIFY_SC_SAST_TOKEN }}
+          PACKAGE_EXTRA_OPTS: -bt mvn
 
   # -------------------------------------------------------------------------
-  # 3) REGISTRY LOGIN + DOCKER BUILD + TRIVY CONTAINER SCAN + PUBLISH
+  # 3a) DOCKER BUILD - build the image locally, hand it off as an artifact
+  #
+  #     The image is deliberately NOT pushed here. It's saved to a tarball
+  #     and uploaded as a workflow artifact so the scan job (3b) always
+  #     scans the exact bits that were built - including on PRs, which
+  #     never touch the registry - and so build/scan/push can each land on
+  #     a different runner without assuming a shared local Docker cache.
   # -------------------------------------------------------------------------
-  docker-build-scan-push:
-    name: Container Build, Scan & Publish
+  docker-build:
+    name: Container Build
     runs-on: self-hosted
     needs: [ build-and-test, sast-scan ]
     permissions:
       contents: read
-      packages: write
-      security-events: write
     outputs:
       image_name: ${{ steps.image.outputs.name }}
       image_tag: ${{ github.sha }}
@@ -204,21 +209,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # --- Registry Login (GHCR) ---
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Normalize image name to lowercase
         id: image
         run: |
           IMAGE_NAME_LC=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
           echo "name=${{ env.REGISTRY }}/${IMAGE_NAME_LC}" >> "$GITHUB_OUTPUT"
 
-      # --- Docker Build & Local Artifact ---
       - name: Build local image tag
         uses: docker/build-push-action@v6
         with:
@@ -229,15 +225,49 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # --- Vulnerability Container Scan (report first, always uploaded) ---
-      # Logic lives in scripts/security/image-scan/trivy.sh
+      - name: Save image to tarball
+        run: docker save "${{ steps.image.outputs.name }}:${{ github.sha }}" -o account-service-image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: account-service-image.tar
+          retention-days: 1
+
+  # -------------------------------------------------------------------------
+  # 3b) IMAGE SCAN - Trivy vulnerability scan of the built image
+  #
+  #     Logic lives in scripts/security/image-scan/trivy.sh. Always uploads
+  #     the SARIF report first, then runs a second pass that fails the
+  #     pipeline on HIGH/CRITICAL findings (with fixes available).
+  # -------------------------------------------------------------------------
+  image-scan:
+    name: Container Image Scan
+    runs-on: self-hosted
+    needs: docker-build
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load image
+        run: docker load -i account-service-image.tar
+
       - name: Trivy scan - generate SARIF report
         env:
           TRIVY_FORMAT: sarif
           TRIVY_OUTPUT: trivy-results.sarif
           TRIVY_SEVERITY: HIGH,CRITICAL
           TRIVY_EXIT_CODE: '0'
-        run: bash "${{ env.IMAGE_SCAN_SCRIPT_DIR }}/trivy.sh" "${{ steps.image.outputs.name }}:${{ github.sha }}"
+        run: bash "${{ env.IMAGE_SCAN_SCRIPT_DIR }}/trivy.sh" "${{ needs.docker-build.outputs.image_name }}:${{ needs.docker-build.outputs.image_tag }}"
 
       - name: Upload Trivy SARIF report to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
@@ -246,7 +276,6 @@ jobs:
           sarif_file: trivy-results.sarif
           category: trivy-container-scan
 
-      # --- Vulnerability Gate: fail the pipeline on HIGH/CRITICAL findings ---
       - name: Trivy scan - enforce HIGH/CRITICAL gate
         env:
           TRIVY_FORMAT: table
@@ -254,20 +283,48 @@ jobs:
           TRIVY_SEVERITY: HIGH,CRITICAL
           TRIVY_EXIT_CODE: '1'
           TRIVY_IGNORE_UNFIXED: 'true'
-        run: bash "${{ env.IMAGE_SCAN_SCRIPT_DIR }}/trivy.sh" "${{ steps.image.outputs.name }}:${{ github.sha }}"
+        run: bash "${{ env.IMAGE_SCAN_SCRIPT_DIR }}/trivy.sh" "${{ needs.docker-build.outputs.image_name }}:${{ needs.docker-build.outputs.image_tag }}"
 
-      # --- Publish (only verified images from main are pushed) ---
-      - name: Push verified image to GHCR with SHA tag
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        uses: docker/build-push-action@v6
+  # -------------------------------------------------------------------------
+  # 3c) DOCKER PUSH - publish the verified image (main branch only)
+  #
+  #     Reloads the same tarball built in 3a (never rebuilds), so what gets
+  #     pushed is byte-for-byte what was scanned in 3b.
+  # -------------------------------------------------------------------------
+  docker-push:
+    name: Container Publish
+    runs-on: self-hosted
+    needs: [ docker-build, image-scan ]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_name: ${{ needs.docker-build.outputs.image_name }}
+      image_tag: ${{ needs.docker-build.outputs.image_tag }}
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
         with:
-          context: .
-          push: true
-          tags: |
-            ${{ steps.image.outputs.name }}:${{ github.sha }}
-            ${{ steps.image.outputs.name }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          name: docker-image
+
+      - name: Load image
+        run: docker load -i account-service-image.tar
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag and push verified image
+        run: |
+          IMAGE="${{ needs.docker-build.outputs.image_name }}"
+          TAG="${{ needs.docker-build.outputs.image_tag }}"
+          docker tag "${IMAGE}:${TAG}" "${IMAGE}:latest"
+          docker push "${IMAGE}:${TAG}"
+          docker push "${IMAGE}:latest"
 
   # -------------------------------------------------------------------------
   # 4a) DEPLOY - basic, single-box EC2 deploy
@@ -283,7 +340,7 @@ jobs:
   deploy-ec2-basic:
     name: Deploy (EC2 basic docker)
     runs-on: self-hosted
-    needs: docker-build-scan-push
+    needs: docker-push
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && (github.event.inputs.deploy_target || vars.DEFAULT_DEPLOY_TARGET || 'ec2-basic') == 'ec2-basic'
     environment:
       name: production
@@ -303,7 +360,7 @@ jobs:
 
       # Logic lives in scripts/deploy/ec2-basic/deploy.sh
       - name: Deploy to EC2
-        run: bash "${{ env.DEPLOY_SCRIPT_DIR }}/ec2-basic/deploy.sh" "${{ needs.docker-build-scan-push.outputs.image_name }}" "${{ needs.docker-build-scan-push.outputs.image_tag }}"
+        run: bash "${{ env.DEPLOY_SCRIPT_DIR }}/ec2-basic/deploy.sh" "${{ needs.docker-push.outputs.image_name }}" "${{ needs.docker-push.outputs.image_tag }}"
 
   # -------------------------------------------------------------------------
   # 4b) DEPLOY - Kubernetes via Helm chart (charts/account-service)
@@ -318,7 +375,7 @@ jobs:
   deploy-kubernetes-helm:
     name: Deploy (Kubernetes / Helm)
     runs-on: self-hosted
-    needs: docker-build-scan-push
+    needs: docker-push
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && (github.event.inputs.deploy_target || vars.DEFAULT_DEPLOY_TARGET || 'ec2-basic') == 'kubernetes-helm'
     environment:
       name: production
@@ -341,7 +398,7 @@ jobs:
 
       # Logic lives in scripts/deploy/kubernetes-helm/deploy.sh
       - name: Deploy via Helm
-        run: bash "${{ env.DEPLOY_SCRIPT_DIR }}/kubernetes-helm/deploy.sh" "${{ needs.docker-build-scan-push.outputs.image_name }}" "${{ needs.docker-build-scan-push.outputs.image_tag }}"
+        run: bash "${{ env.DEPLOY_SCRIPT_DIR }}/kubernetes-helm/deploy.sh" "${{ needs.docker-push.outputs.image_name }}" "${{ needs.docker-push.outputs.image_tag }}"
 
       - name: Remove kubeconfig
         if: always()
