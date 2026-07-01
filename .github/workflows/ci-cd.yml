@@ -1,0 +1,226 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  JAVA_VERSION: '21'
+
+# Least-privilege default; individual jobs elevate only what they need.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # -------------------------------------------------------------------------
+  # 1) BUILD STAGE - compile, unit test, package
+  # -------------------------------------------------------------------------
+  build-and-test:
+    name: Build & Unit Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Run unit tests
+        run: mvn -B clean test
+
+      - name: Package application (skip re-running tests)
+        run: mvn -B package -DskipTests
+
+      - name: Upload jar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: account-service-jar
+          path: target/account-service.jar
+          retention-days: 5
+
+  # -------------------------------------------------------------------------
+  # 2) SAST SCAN - Fortify Static Code Analyzer
+  #
+  # Requires the following secrets configured at the GitHub Organization
+  # level (Settings > Secrets and variables > Actions > Organization secrets):
+  #   FORTIFY_SSC_URL     - URL of the Fortify Software Security Center
+  #   FORTIFY_SSC_TOKEN    - SSC CIToken with upload permissions
+  #   FORTIFY_LICENSE      - Base64-encoded Fortify license (fortify.license)
+  # These are placeholders; the job is a no-op stub until an organization
+  # with a valid Fortify entitlement supplies real secret values.
+  # -------------------------------------------------------------------------
+  sast-scan:
+    name: Fortify SAST Scan
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Fortify Static Code Analyzer scan
+        uses: fortify/github-action/sast-scan@v1
+        with:
+          sast-scan-args: -b account-service -bt mvn -bf pom.xml
+        env:
+          FORTIFY_SSC_URL: ${{ secrets.FORTIFY_SSC_URL }}
+          FORTIFY_TOKEN: ${{ secrets.FORTIFY_SSC_TOKEN }}
+          FORTIFY_LICENSE: ${{ secrets.FORTIFY_LICENSE }}
+
+      - name: Import Fortify results into GitHub Security tab
+        uses: fortify/github-action/fpr-import@v1
+        with:
+          file: gh-scan-output.fpr
+        env:
+          FORTIFY_SSC_URL: ${{ secrets.FORTIFY_SSC_URL }}
+          FORTIFY_TOKEN: ${{ secrets.FORTIFY_SSC_TOKEN }}
+
+  # -------------------------------------------------------------------------
+  # 3) REGISTRY LOGIN + DOCKER BUILD + TRIVY CONTAINER SCAN + PUBLISH
+  # -------------------------------------------------------------------------
+  docker-build-scan-push:
+    name: Container Build, Scan & Publish
+    runs-on: ubuntu-latest
+    needs: [ build-and-test, sast-scan ]
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # --- Registry Login (GHCR) ---
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Normalize image name to lowercase
+        id: image
+        run: |
+          IMAGE_NAME_LC=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=${{ env.REGISTRY }}/${IMAGE_NAME_LC}" >> "$GITHUB_OUTPUT"
+
+      # --- Docker Build & Local Artifact ---
+      - name: Build local image tag
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.image.outputs.name }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --- Vulnerability Container Scan (report first, always uploaded) ---
+      - name: Trivy scan - generate SARIF report
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ steps.image.outputs.name }}:${{ github.sha }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          exit-code: '0'
+
+      - name: Upload Trivy SARIF report to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-container-scan
+
+      # --- Vulnerability Gate: fail the pipeline on HIGH/CRITICAL findings ---
+      - name: Trivy scan - enforce HIGH/CRITICAL gate
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ steps.image.outputs.name }}:${{ github.sha }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+
+      # --- Publish (only verified images from main are pushed) ---
+      - name: Push verified image to GHCR with SHA tag
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ github.sha }}
+            ${{ steps.image.outputs.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # -------------------------------------------------------------------------
+  # 4) DEPLOY - Kubernetes / GitOps CD stub
+  #
+  # Requires a base64-encoded kubeconfig stored as the KUBE_CONFIG_BASE64
+  # secret in the "production" GitHub Environment (Settings > Environments),
+  # ideally gated behind required reviewers. Generate with:
+  #   cat ~/.kube/config | base64 -w0
+  # -------------------------------------------------------------------------
+  deploy:
+    name: Deploy to Kubernetes (GitOps)
+    runs-on: ubuntu-latest
+    needs: docker-build-scan-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: production
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.30.0'
+
+      - name: Configure kubeconfig from secret
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBE_CONFIG_BASE64 }}" | base64 --decode > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Deploy image to cluster
+        run: |
+          IMAGE_NAME_LC=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+          kubectl set image deployment/account-service \
+            account-service=${{ env.REGISTRY }}/${IMAGE_NAME_LC}:${{ github.sha }} \
+            -n banking
+
+      - name: Wait for rollout to complete
+        run: kubectl rollout status deployment/account-service -n banking --timeout=180s
+
+      - name: Remove kubeconfig
+        if: always()
+        run: rm -f "$HOME/.kube/config"
