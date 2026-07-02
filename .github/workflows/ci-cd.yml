@@ -50,6 +50,10 @@ on:
         type: choice
         options: [ 'false', 'true' ]
         default: 'false'
+      deploy_port:
+        description: 'Host port the deployed container listens on (EC2 basic deploy)'
+        type: string
+        default: '8081'
 
 env:
   IMAGE_NAME: ${{ github.event.repository.name }}
@@ -57,6 +61,7 @@ env:
   SAST_TOOL: ${{ github.event.inputs.sast_tool || vars.DEFAULT_SAST_TOOL || 'semgrep' }}
   DEPLOY_TARGET: ${{ github.event.inputs.deploy_target || vars.DEFAULT_DEPLOY_TARGET || 'ec2-basic' }}
   FAIL_ON_SAST_FINDINGS: ${{ github.event.inputs.fail_on_sast_findings || vars.DEFAULT_FAIL_ON_SAST || 'false' }}
+  DEPLOY_PORT: ${{ github.event.inputs.deploy_port || vars.DEFAULT_DEPLOY_PORT || '8081' }}
   SAST_SCRIPT_DIR: scripts/security/sast
   IMAGE_SCAN_SCRIPT_DIR: scripts/security/image-scan
   DEPLOY_SCRIPT_DIR: scripts/deploy
@@ -369,6 +374,8 @@ jobs:
 
       # Logic lives in scripts/deploy/ec2-basic/deploy.sh
       - name: Deploy to EC2
+        env:
+          DEPLOY_PORT: ${{ env.DEPLOY_PORT }}
         run: bash "${{ env.DEPLOY_SCRIPT_DIR }}/ec2-basic/deploy.sh" "${{ needs.docker-push.outputs.image_name }}" "${{ needs.docker-push.outputs.image_tag }}"
 
   # -------------------------------------------------------------------------
