@@ -55,3 +55,132 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/actuator/health || exit 1
 
 ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]
+
+###############################################################################
+# NOTES
+###############################################################################
+#
+# Multi-stage build overview
+# --------------------------
+# Stage 1 (build)
+#   - Uses Maven image to compile the Spring Boot application.
+#   - Copies pom.xml first so `mvn dependency:go-offline` can be cached.
+#   - If only source code changes, Maven dependencies are NOT downloaded again.
+#
+# Stage 2 (layers)
+#   - Uses Spring Boot Layertools to extract the fat JAR into Docker layers.
+#   - Command:
+#       java -Djarmode=layertools -jar application.jar extract
+#   - Produces:
+#       dependencies/
+#       spring-boot-loader/
+#       snapshot-dependencies/
+#       application/
+#
+# Stage 3 (runtime)
+#   - Uses a minimal JRE image.
+#   - Does not include Maven or source code.
+#   - Runs as a non-root user for better security.
+#   - Copies each extracted layer separately.
+#
+# Why use Layertools?
+# -------------------
+# Without Layertools:
+#
+#   application.jar (single layer)
+#
+#   Any code change -> entire JAR layer is rebuilt.
+#
+# With Layertools:
+#
+#   dependencies/
+#   spring-boot-loader/
+#   snapshot-dependencies/
+#   application/
+#
+#   Only the "application" layer usually changes.
+#   Dependency layers are reused from Docker's build cache, making rebuilds
+#   much faster.
+#
+# Docker Cache
+# ------------
+# Docker stores build layers in its local cache (managed by the Docker daemon).
+#
+# During rebuild:
+#   - Same instruction + same files = cache reused.
+#   - Changed files = only that layer and subsequent layers are rebuilt.
+#
+# Example:
+#
+#   Change Java code
+#      ↓
+#   dependencies/          ✔ Reused
+#   spring-boot-loader/    ✔ Reused
+#   snapshot-dependencies/ ✔ Reused
+#   application/           ✘ Rebuilt
+#
+# Result:
+#   Faster builds because large dependency layers don't need to be recreated.
+#
+###############################################################################
+
+###############################################################################
+# ENTRYPOINT EXPLANATION
+###############################################################################
+#
+# Why don't we use:
+#
+#   java -jar application.jar
+#
+# Normally, Spring Boot packages everything into a single executable JAR
+# (application classes + dependencies + Spring Boot loader), so Java can
+# execute it directly.
+#
+# However, in this Dockerfile we run:
+#
+#   java -Djarmode=layertools -jar application.jar extract
+#
+# This extracts the JAR into separate directories:
+#
+#   dependencies/
+#   spring-boot-loader/
+#   snapshot-dependencies/
+#   application/
+#
+# The final runtime image no longer contains a single executable JAR.
+# Instead, it contains the extracted files copied into /application.
+#
+# The class:
+#
+#   org.springframework.boot.loader.launch.JarLauncher
+#
+# is provided by the spring-boot-loader/ layer. It is Spring Boot's launcher
+# class (contains a public static void main() method).
+#
+# Running:
+#
+#   java org.springframework.boot.loader.launch.JarLauncher
+#
+# is effectively the equivalent of:
+#
+#   java -jar application.jar
+#
+# JarLauncher automatically:
+#   1. Finds the dependency JARs.
+#   2. Builds the application classpath.
+#   3. Locates the application's Main-Class.
+#   4. Starts the Spring Boot application.
+#
+# Easy way to remember:
+#
+#   Fat JAR
+#       -> java -jar application.jar
+#
+#   Layered (layertools extract)
+#       -> java org.springframework.boot.loader.launch.JarLauncher
+#
+# Rule of thumb:
+# If the application is still packaged as one JAR, use "java -jar".
+# If the JAR has been extracted into layers, use Spring Boot's JarLauncher.
+#
+###############################################################################
