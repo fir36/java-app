@@ -184,3 +184,33 @@ ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]
 # If the JAR has been extracted into layers, use Spring Boot's JarLauncher.
 #
 ###############################################################################
+
+# =============================================================================
+# SIMPLE DOCKERFILE (REFERENCE ONLY - NOT USED BY BUILD)
+# =============================================================================
+#
+# FROM maven:3.9.9-eclipse-temurin-21-alpine AS build
+#
+# WORKDIR /build
+#
+# COPY . .
+#
+# RUN mvn clean package -DskipTests
+#
+# FROM eclipse-temurin:21-jre-alpine
+#
+# WORKDIR /application
+#
+# COPY --from=build /build/target/account-service.jar application.jar
+#
+# EXPOSE 8080
+#
+# ENTRYPOINT ["java", "-jar", "application.jar"]
+#
+# =============================================================================
+# This is the simplified version of the Dockerfile:
+# - Builds everything in one Maven step
+# - No layer caching optimization
+# - Easier to understand
+# - Suitable for learning or small projects
+# =============================================================================
