@@ -1,7 +1,7 @@
 replicaCount: 2
 
 image:
-  repository: docker.io/fir36/java-app
+  repository: docker.io/daus99/java-app
   tag: latest
   pullPolicy: IfNotPresent
 
